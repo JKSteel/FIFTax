@@ -28,10 +28,8 @@ from the statutory FIF calculation in fif_tax.py:
 
 import argparse
 import csv
-import re
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal, ROUND_HALF_EVEN
-from pathlib import Path
 
 from fif_tax import RbnzRates, TAX_BRACKETS, RBNZ_FILE, SHARESIES_DIR
 
