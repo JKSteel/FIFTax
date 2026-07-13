@@ -31,8 +31,18 @@ python -m venv venv
 
 ## Method notes
 
-See the docstring at the top of `fif_tax.py` for the conversion conventions,
-the treatment of bullion-backed ETPs (`NON_FIF_OVERRIDES`), and which
-withholding tax is claimed as a foreign tax credit. This is not tax advice;
-confirm positions with an accountant, particularly the $50,000 de minimis
-threshold and the treatment of gold ETPs.
+See the docstring at the top of `fif_tax.py` for the conversion conventions
+and which withholding tax is claimed as a foreign tax credit. This is not
+tax advice; confirm positions with an accountant, particularly the $50,000
+de minimis threshold.
+
+## Reconciling with fif.nz
+
+`fifnz_replica.py` reproduces the fif.nz calculator's results to the cent
+(same year/files/other income as `fif_tax.py`). fif.nz's CV differs from the
+statutory calculation because its transaction import creates zero-value
+"phantom" holdings for non-FIF (NZX/ASX-exempt) tickers, silently drops
+holdings whose share balance goes negative (including genuine FIF sales),
+grosses up already-gross dividends by the withholding tax, and caps the
+foreign tax credit per holding. The FDR figure and box 17B generally agree;
+CV and box 17A may not. See the replica's docstring for details.

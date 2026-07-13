@@ -29,14 +29,19 @@ Key conventions
   and summed, plus any quick sale adjustment.
 - Dividends and withholding tax are reported by Sharesies only as annual
   totals with no payment dates, so they are converted at the tax-year average
-  of RBNZ daily rates. CV uses dividends on a cash basis (net of withholding
-  tax deducted at source).
-- Creditable overseas tax is the US and AU withholding tax columns only.
-  The 'Foreign withholding tax' column is typically tax withheld inside a
-  fund's underlying holdings, which is not directly creditable to the NZ
-  investor - review any direct ADR withholding in that column manually.
+  of RBNZ daily rates. CV uses gross dividends (the Sharesies dividends
+  column is before withholding tax; the tax itself is claimed as a credit,
+  not deducted from income).
+- Creditable overseas tax is the withholding tax denominated in each
+  holding's own trading currency: 'US withholding tax (USD)' plus 'Foreign
+  withholding tax (USD)' for USD holdings (covers direct US and ADR
+  withholding), and 'AU withholding tax (AUD)' for AUD holdings. USD-
+  denominated 'foreign' tax attached to AUD funds is tax withheld inside the
+  fund's underlying holdings and is not directly creditable.
+- The foreign tax credit is capped per currency segment (a proxy for source
+  country, s LJ 5) at the NZ tax attributable to that segment's FIF income.
 - Instruments in NON_FIF_OVERRIDES are excluded from the FIF calculation
-  even if Sharesies flags them as FIF (see the constant for rationale).
+  even if Sharesies flags them as FIF (empty by default).
 
 Method references: Income Tax Act 2007 ss EX 44-EX 61, IRD guide IR461.
 """
@@ -64,15 +69,13 @@ DE_MINIMIS_NZD = 50_000  # FIF rules optional if total COST of FIF shares <= $50
 
 NZ_TZ = ZoneInfo("Pacific/Auckland")
 
-# Instruments excluded from the FIF regime regardless of the Sharesies flag.
-# Bullion-backed "structured" ETPs (e.g. Global X GOLD, Perth Mint PMGOLD and
-# the GXLD product held here) legally confer a direct entitlement to physical
-# metal rather than shares in a foreign company, so they fall outside the FIF
-# definition. Profits on such holdings are instead usually taxable on revenue
-# account when sold (gold is acquired for the dominant purpose of disposal).
-NON_FIF_OVERRIDES = {
-    "GXLD": "Direct entitlement to physical gold (structured product), not a FIF interest",
-}
+# Instruments to exclude from the FIF regime regardless of the Sharesies
+# flag, e.g. {"TICKER": "reason"}. Some bullion-backed structured ETPs
+# (Perth Mint PMGOLD style) confer a direct entitlement to physical metal
+# rather than shares in a foreign company and arguably fall outside the FIF
+# definition - add such holdings here only on professional advice, as their
+# sale profits are then usually taxable separately on revenue account.
+NON_FIF_OVERRIDES: dict[str, str] = {}
 
 # Personal income tax brackets by tax year (year ended 31 March).
 # 2025 uses IRD's composite rates for the mid-year threshold change on
@@ -326,31 +329,30 @@ def build_fif_table(holdings: pd.DataFrame, ledger: pd.DataFrame, rates: RbnzRat
     avg = {c: rates.average_rate(opening_date, closing_date, c)
            for c in set(tbl["Currency"]) | {"USD", "AUD"}}
     tbl["Dividends gross (NZD)"] = tbl["Dividends and distributions"] / tbl["Currency"].map(avg)
-    tbl["Withholding tax (NZD)"] = (
-        (tbl["US withholding tax (USD)"] + tbl["Foreign withholding tax (USD)"]) / avg["USD"]
-        + tbl["AU withholding tax (AUD)"] / avg["AUD"]
-    )
-    tbl["Dividends net (NZD)"] = tbl["Dividends gross (NZD)"] - tbl["Withholding tax (NZD)"]
 
-    # Only US and AU withholding tax is treated as a creditable foreign tax;
-    # the 'Foreign withholding tax' column is generally fund-level tax.
+    # Creditable overseas tax: the withholding columns denominated in the
+    # holding's own trading currency (direct tax on the investor's dividends).
+    # USD-denominated 'foreign' tax on AUD funds is fund-level tax withheld
+    # inside the fund's underlying holdings and is not directly creditable.
+    usd_wht = (tbl["US withholding tax (USD)"] + tbl["Foreign withholding tax (USD)"]) / avg["USD"]
+    aud_wht = tbl["AU withholding tax (AUD)"] / avg["AUD"]
     tbl["Creditable overseas tax (NZD)"] = (
-        tbl["US withholding tax (USD)"] / avg["USD"]
-        + tbl["AU withholding tax (AUD)"] / avg["AUD"]
+        usd_wht.where(tbl["Currency"] == "USD", 0.0)
+        + aud_wht.where(tbl["Currency"] == "AUD", 0.0)
     )
 
-    # CV per holding: (closing value + sale proceeds + net dividends)
+    # CV per holding: (closing value + sale proceeds + gross dividends)
     # less (opening value + purchase costs). The statutory floor at zero
     # applies to the portfolio total, not per holding.
     tbl["CV contribution (NZD)"] = (
-        tbl["Closing value (NZD)"] + tbl["Sales (NZD)"] + tbl["Dividends net (NZD)"]
+        tbl["Closing value (NZD)"] + tbl["Sales (NZD)"] + tbl["Dividends gross (NZD)"]
         - tbl["Opening value (NZD)"] - tbl["Purchases (NZD)"]
     )
 
     # Overridden instruments carry no FIF income and no credit.
     excluded = ~tbl["Is FIF"]
     zero_cols = ["FDR income (NZD)", "CV contribution (NZD)", "Creditable overseas tax (NZD)",
-                 "Dividends gross (NZD)", "Dividends net (NZD)", "Withholding tax (NZD)",
+                 "Dividends gross (NZD)",
                  "Purchases (NZD)", "Sales (NZD)", "Opening value (NZD)", "Closing value (NZD)"]
     tbl.loc[excluded, zero_cols] = 0.0
     tbl[zero_cols] = tbl[zero_cols].astype(float)  # keeps sums numeric when empty
@@ -497,7 +499,7 @@ def main() -> None:
     closing_nzd = fif_tbl["Closing value (NZD)"].sum()
     purchases_nzd = fif_tbl["Purchases (NZD)"].sum()
     sales_nzd = fif_tbl["Sales (NZD)"].sum()
-    dividends_net_nzd = fif_tbl["Dividends net (NZD)"].sum()
+    dividends_nzd = fif_tbl["Dividends gross (NZD)"].sum()
     overseas_tax_nzd = fif_tbl["Creditable overseas tax (NZD)"].sum()
 
     # --- FIF income under each method ---------------------------------------
@@ -517,8 +519,14 @@ def main() -> None:
     nz_tax_on_fif = (progressive_tax(other_income + fif_income, brackets)
                      - progressive_tax(other_income, brackets))
 
-    # Foreign tax credit is limited to the NZ tax payable on the FIF income.
-    credit = round(min(overseas_tax_nzd, nz_tax_on_fif), 2)
+    # Foreign tax credit, capped per currency segment (proxy for source
+    # country, s LJ 5) at the NZ tax attributable to that segment's share of
+    # the FIF income under the elected method.
+    income_col = "FDR income (NZD)" if use_fdr else "CV contribution (NZD)"
+    seg_income = fif_tbl[income_col].clip(lower=0).groupby(fif_tbl["Currency"]).sum()
+    seg_wht = fif_tbl["Creditable overseas tax (NZD)"].groupby(fif_tbl["Currency"]).sum()
+    eff_rate = nz_tax_on_fif / fif_income if fif_income > 0 else 0.0
+    credit = round(sum(min(seg_wht[c], eff_rate * seg_income.get(c, 0.0)) for c in seg_wht.index), 2)
     net_tax = round(nz_tax_on_fif, 2) - credit
 
     excluded_rows = fif_tbl[~fif_tbl["Is FIF"]]
@@ -533,7 +541,7 @@ def main() -> None:
     print(f"  Closing market value (31 Mar):       ${closing_nzd:>12,.2f} NZD")
     print(f"  Purchases during year (incl. fees):  ${purchases_nzd:>12,.2f} NZD")
     print(f"  Sales during year (net of fees):     ${sales_nzd:>12,.2f} NZD")
-    print(f"  Dividends received (net of WHT):     ${dividends_net_nzd:>12,.2f} NZD")
+    print(f"  Dividends received (gross):          ${dividends_nzd:>12,.2f} NZD")
     print("-" * w)
     print(f"  FDR income (5% x opening value):     ${fdr_base:>12,.2f}")
     print(f"  FDR quick sale adjustment:           ${qs_total:>12,.2f}")
@@ -556,8 +564,6 @@ def main() -> None:
     for _, r in excluded_rows.iterrows():
         print(f"  - {r['Investment ticker symbol']} ({r['Investment name']}) is excluded from FIF:")
         print(f"    {NON_FIF_OVERRIDES[r['Investment ticker symbol']]}.")
-        print("    Any profit when it is sold is likely taxable separately as income")
-        print("    from gold held for disposal - not calculated here.")
     print(f"  - If the total COST of your FIF investments never exceeded ${DE_MINIMIS_NZD:,},")
     print("    the FIF rules are optional (de minimis, s CQ 5). Cost history is not")
     print("    in these reports, so confirm this yourself.")
@@ -565,8 +571,9 @@ def main() -> None:
     print("  - Dividends and withholding tax are annual totals in the Sharesies")
     print("    report, converted at the tax-year average RBNZ rate; converting at")
     print("    actual payment dates may shift results by a few dollars.")
-    print("  - 'Foreign withholding tax' (fund-level) is not claimed as a credit;")
-    print("    any direct ADR withholding in that column may be claimable - review.")
+    print("  - Credited overseas tax: withholding denominated in each holding's own")
+    print("    currency (US + foreign/ADR tax on USD holdings, AU tax on AUD ones);")
+    print("    fund-level tax inside AUD funds is not directly creditable.")
     if overseas_tax_nzd - credit > 0.005:
         print(f"  - Overseas tax of ${overseas_tax_nzd - credit:,.2f} exceeded the NZ tax on this")
         print("    income and cannot be credited (credit capped at NZ tax payable).")
@@ -582,7 +589,7 @@ def main() -> None:
             ("Closing FIF market value (NZD)", round(closing_nzd, 2)),
             ("Purchases (NZD, incl. fees)", round(purchases_nzd, 2)),
             ("Sales (NZD, net of fees)", round(sales_nzd, 2)),
-            ("Dividends (NZD, net of withholding tax)", round(dividends_net_nzd, 2)),
+            ("Dividends (NZD, gross)", round(dividends_nzd, 2)),
             ("FDR base income (5% x opening, per holding)", round(fdr_base, 2)),
             ("FDR quick sale adjustment", round(qs_total, 2)),
             ("FDR income", fdr_income),
@@ -598,7 +605,9 @@ def main() -> None:
             ("FX source", "RBNZ B1 daily (weekends/holidays forward-filled)"),
             ("Transactions", "Converted at RBNZ rate on NZ-calendar trade date"),
             ("Dividends / withholding tax", "Annual totals converted at tax-year average rate"),
-            ("Creditable overseas tax", "US + AU withholding tax columns only"),
+            ("CV dividends", "Gross (withholding tax claimed as credit, not deducted)"),
+            ("Creditable overseas tax", "Withholding in each holding's own currency; "
+                                        "capped per currency segment at NZ tax on that segment"),
         ] + [
             (f"Excluded from FIF: {r['Investment ticker symbol']}",
              NON_FIF_OVERRIDES[r["Investment ticker symbol"]])
@@ -611,8 +620,7 @@ def main() -> None:
         "Investment ticker symbol", "Investment name", "Currency", "FIF treatment",
         "Starting investment dollar value", "Opening rate", "Opening value (NZD)",
         "Ending investment dollar value", "Closing rate", "Closing value (NZD)",
-        "FDR income (NZD)", "Purchases (NZD)", "Sales (NZD)",
-        "Dividends gross (NZD)", "Withholding tax (NZD)", "Dividends net (NZD)",
+        "FDR income (NZD)", "Purchases (NZD)", "Sales (NZD)", "Dividends gross (NZD)",
         "CV contribution (NZD)", "Creditable overseas tax (NZD)",
     ]
     val_out = fif_tbl[val_cols].rename(columns={
