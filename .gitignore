@@ -1,0 +1,9 @@
+# Personal financial data - never commit
+incomeReports/
+data/
+tax/
+
+# Python
+venv/
+__pycache__/
+*.pyc
